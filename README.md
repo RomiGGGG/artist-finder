@@ -1,1 +1,188 @@
-# artist-finder
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tattoo Artist Finder</title>
+  <style>
+    :root { --radius: 14px; --pad: 14px; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; color:#111; background:#fff; }
+    .wrap { padding: 16px; max-width: 900px; margin: 0 auto; }
+    .card { background:#f8f8f8; border-radius: var(--radius); padding: var(--pad); box-shadow: 0 2px 10px rgba(0,0,0,.05); }
+    .row { display: grid; grid-template-columns: 1fr 160px 140px 110px; gap: 10px; }
+    @media (max-width: 780px) { .row { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 480px) { .row { grid-template-columns: 1fr; } }
+    input, select, button {
+      height: 40px; border-radius: 10px; border:1px solid #ddd; padding: 0 10px; font-size:14px;
+    }
+    button { background:#111; color:#fff; cursor:pointer; border:none; }
+    button:disabled { background:#999; cursor:not-allowed; }
+    .muted { color:#666; font-size: 12px; margin-top: 8px; }
+    .results { margin-top: 14px; display: grid; gap: 10px; }
+    .item { background:#fff; border:1px solid #eee; border-radius: 12px; padding: 12px; display:flex; justify-content:space-between; align-items:center; }
+    .name { font-weight: 700; }
+    .right { text-align:right; min-width: 96px; }
+    .err { color:#b00020; font-size:13px; margin-top:8px; }
+    .ok { color:#0a7a2f; font-size:13px; margin-top:8px; }
+    .empty { text-align:center; color:#666; padding:18px; border:1px dashed #ddd; border-radius:12px; background:#fff; }
+    .spinner { width:16px; height:16px; border:2px solid #fff; border-top-color:transparent; border-radius:50%; display:inline-block; vertical-align:middle; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg);} }
+    .pill { display:inline-block; background:#111; color:#fff; border-radius:999px; padding:2px 8px; font-size:12px; }
+    .controls { display:flex; align-items:center; gap:8px; justify-content:flex-end; margin-top:6px; }
+    .unit-toggle { display:flex; align-items:center; gap:6px; font-size:13px; color:#333; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <form id="finder" class="row" autocomplete="postal-code">
+        <input id="postcode" inputmode="text" placeholder="Enter UK postcode (e.g. SW1A 1AA)" aria-label="Postcode" required />
+        <select id="radius" aria-label="Radius">
+          <option value="20" selected>20 miles</option>
+          <option value="50">50 miles</option>
+          <option value="100">100 miles</option>
+        </select>
+        <select id="fallback" aria-label="If none found, expand to">
+          <option value="0" selected>Strict radius</option>
+          <option value="20">+20 miles</option>
+          <option value="50">+50 miles</option>
+          <option value="100">+100 miles</option>
+        </select>
+        <button id="go" type="submit"><span class="btn-text">Search</span></button>
+      </form>
+
+      <div class="controls">
+        <div class="unit-toggle">
+          Units:
+          <label><input type="radio" name="units" value="mi" checked /> mi</label>
+          <label><input type="radio" name="units" value="km" /> km</label>
+        </div>
+      </div>
+
+      <div id="msg" class="muted">UK only (postcodes.io). Add more artists below.</div>
+      <div id="error" class="err" style="display:none;"></div>
+      <div id="results" class="results"></div>
+    </div>
+  </div>
+
+  <script>
+    // ====== 1) YOUR ARTISTS HERE ======
+    const ARTISTS = [
+      { id: "a1", name: "Artist Alpha", lat: 51.5074, lng: -0.1278, city: "London", contact: "IG: @artist.alpha" },
+      { id: "a2", name: "Artist Bravo", lat: 52.4862, lng: -1.8904, city: "Birmingham", contact: "IG: @artist.bravo" },
+      { id: "a3", name: "Artist Charlie", lat: 53.4808, lng: -2.2426, city: "Manchester", contact: "IG: @artist.charlie" },
+      { id: "a4", name: "Artist Delta", lat: 55.9533, lng: -3.1883, city: "Edinburgh", contact: "IG: @artist.delta" }
+      // Add more like:
+      // { id:"a5", name:"Artist Echo", lat: 51.4545, lng:-2.5879, city:"Bristol", contact:"IG: @artist.echo" }
+    ];
+
+    // ====== 2) UTILITIES ======
+    const btn = document.getElementById("go");
+    const btnTxt = btn.querySelector(".btn-text");
+    const pcInput = document.getElementById("postcode");
+    const radiusSel = document.getElementById("radius");
+    const fallbackSel = document.getElementById("fallback");
+    const resultsEl = document.getElementById("results");
+    const errorEl = document.getElementById("error");
+    const msgEl = document.getElementById("msg");
+    const unitRadios = Array.from(document.querySelectorAll('input[name="units"]'));
+
+    const toRad = (d) => d * Math.PI / 180;
+    const EARTH_KM = 6371;
+    const KM_PER_MI = 1.609344;
+
+    function haversine(lat1, lon1, lat2, lon2){
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+      return EARTH_KM * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    }
+    const km = (n) => Math.round(n * 10) / 10;
+    const mi = (n) => Math.round((n / KM_PER_MI) * 10) / 10;
+
+    function selectedUnits(){ return unitRadios.find(r => r.checked)?.value === "km" ? "km" : "mi"; }
+    function fmtDistance(kmVal){
+      return selectedUnits() === "km" ? (km(kmVal) + " km") : (mi(kmVal) + " mi");
+    }
+    function milesToKm(m){ return m * KM_PER_MI; }
+
+    function setLoading(v){
+      if (v) { btn.disabled = true; btnTxt.innerHTML = '<span class="spinner"></span>'; }
+      else { btn.disabled = false; btnTxt.textContent = "Search"; }
+    }
+    function showError(msg){ errorEl.style.display = "block"; errorEl.textContent = msg; }
+    function clearError(){ errorEl.style.display = "none"; errorEl.textContent = ""; }
+
+    async function geocodeUK(postcode){
+      const pc = (postcode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/([A-Z0-9]{3})$/, " $1").trim();
+      const res = await fetch("https://api.postcodes.io/postcodes/" + encodeURIComponent(pc));
+      if (!res.ok) throw new Error("Postcode lookup failed (" + res.status + ")");
+      const data = await res.json();
+      if (!data || data.status !== 200 || !data.result) throw new Error("Postcode not found.");
+      return { lat: data.result.latitude, lng: data.result.longitude, postcode: data.result.postcode };
+    }
+
+    function render(center, maxKm){
+      const enriched = ARTISTS.map(a => ({ ...a, distanceKm: haversine(center.lat, center.lng, a.lat, a.lng) }))
+        .sort((a,b) => a.distanceKm - b.distanceKm);
+
+      const within = enriched.filter(a => a.distanceKm <= maxKm);
+
+      resultsEl.innerHTML = "";
+      if (within.length === 0) {
+        resultsEl.innerHTML = '<div class="empty">No artists within ' + fmtDistance(maxKm) + '. Try a larger radius.</div>';
+        msgEl.className = "muted";
+        msgEl.textContent = "No matches.";
+        return;
+      }
+
+      within.forEach(a => {
+        const el = document.createElement("div");
+        el.className = "item";
+        el.innerHTML = `
+          <div>
+            <div class="name">${a.name}</div>
+            <div class="muted">${a.city ? a.city + " · " : ""}${a.contact || ""}</div>
+          </div>
+          <div class="right"><span class="pill">${fmtDistance(a.distanceKm)}</span></div>
+        `;
+        resultsEl.appendChild(el);
+      });
+
+      msgEl.className = "ok";
+      msgEl.textContent = "Showing " + within.length + " of " + ARTISTS.length + " artist(s) within " + fmtDistance(maxKm) + ".";
+    }
+
+    document.getElementById("finder").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      clearError();
+      setLoading(true);
+      resultsEl.innerHTML = "";
+      msgEl.className = "muted";
+      msgEl.textContent = "Searching…";
+      try {
+        const center = await geocodeUK(pcInput.value);
+        const baseMiles = parseFloat(radiusSel.value);
+        const extraMiles = parseFloat(fallbackSel.value);
+        const radiusKm = milesToKm(baseMiles + (isNaN(extraMiles) ? 0 : extraMiles));
+        render(center, radiusKm);
+      } catch (err) {
+        showError(err.message || "Something went wrong.");
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    // Live re-render in different units
+    unitRadios.forEach(r => r.addEventListener("change", () => {
+      // Just re-submit silently if there are results; otherwise ignore.
+      const items = resultsEl.querySelectorAll(".item");
+      if (items.length > 0) {
+        const evt = new Event("submit");
+        document.getElementById("finder").dispatchEvent(evt);
+      }
+    }));
+  </script>
+</body>
+</html>
